@@ -165,7 +165,7 @@ jobs:
           Description: SideInstaller standalone IPA signing app for RootHide jailbreak.
           Maintainer: xiaofeifei996
           Section: Applications
-          Depends: firmware (>= 17.4)
+          Depends: firmware (>= 16.0)
           CONTROL
 
           cat > "$pkg/DEBIAN/postinst" <<'POSTINST'
