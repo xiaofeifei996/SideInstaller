@@ -3,11 +3,11 @@ options:
   # Brand reverse-DNS prefix. NOTE: this is a chosen handle only — it is NOT
   # tied to an Apple Developer account (DEVELOPMENT_TEAM stays empty below).
   bundleIdPrefix: com.frizzle
-  # iOS 27 is what pairs itself; 17.4 is what the rest of the pipeline needs
-  # (CoreDeviceProxy over LocalDevVPN, and the Rust core's minos), and an older
-  # iPhone gets there by importing a pairing file made on a computer.
+  # Keep the app binary installable on iOS 16. Device transport is selected
+  # at runtime; the legacy Lockdown adapter must be implemented before iOS 16
+  # pairing/install can be advertised as supported.
   deploymentTarget:
-    iOS: "17.4"
+    iOS: "16.0"
   createIntermediateGroups: true
 
 settings:
