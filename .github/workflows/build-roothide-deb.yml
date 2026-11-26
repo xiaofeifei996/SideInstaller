@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: roothide-deb-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   XCODE_VERSION: "27.1"
