@@ -97,6 +97,12 @@ jobs:
           app="$stage/Payload/SideInstaller.app"
           test -d "$app"
           test -x "$app/SideInstaller"
+          minimum_os="$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$app/Info.plist")"
+          if [[ "$minimum_os" != "16.0" ]]; then
+            echo "::error::Expected app MinimumOSVersion 16.0, got $minimum_os"
+            exit 1
+          fi
+          echo "Verified app MinimumOSVersion: $minimum_os"
 
           cat > "$RUNNER_TEMP/roothide-entitlements.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
