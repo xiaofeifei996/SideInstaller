@@ -1,0 +1,169 @@
+name: build-rootless-deb
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - relaxin-rootless-ios26
+    paths:
+      - "ios-app/**"
+      - "ios-live-activity/**"
+      - "ios-tests/**"
+      - "rust-core/**"
+      - "project.yml"
+      - "build-rust.sh"
+      - "scripts/build-ipa.sh"
+      - ".github/workflows/build-rootless-deb.yml"
+      - "LICENSE.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rootless-deb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODE_VERSION: "27.1"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Relaxin Rootless Debian package
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=""
+          for candidate in "/Applications/Xcode_${XCODE_VERSION}.app" /Applications/Xcode_"${XCODE_VERSION}"_*.app; do
+            if [[ -d "$candidate" ]]; then app="$candidate"; break; fi
+          done
+          if [[ -z "$app" ]]; then
+            app="$(xcode-select -p)"
+            app="${app%/Contents/Developer}"
+            echo "::warning::Xcode ${XCODE_VERSION} not found by name; using $app"
+          fi
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$app/Contents/Developer" xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install xcodegen ldid dpkg
+          rustup target add aarch64-apple-ios
+          command -v xcodegen
+          command -v ldid
+          command -v dpkg-deb
+          rustc --version
+          cargo --version
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust-core/target
+          key: rootless-cargo-${{ runner.os }}-${{ hashFiles('rust-core/Cargo.lock') }}
+          restore-keys: rootless-cargo-${{ runner.os }}-
+
+      - name: Build iOS app
+        shell: bash
+        env:
+          OUTPUT: ${{ runner.temp }}/SideInstaller.ipa
+          DERIVED_DATA: ${{ runner.temp }}/DerivedData
+          MIN_IOS_SDK: "27.1"
+          REBUILD_RUST: "1"
+        run: bash scripts/build-ipa.sh
+
+      - name: Sign app binaries for jailbroken installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/rootless-package"
+          mkdir -p "$stage/Payload"
+          ditto -x -k "$RUNNER_TEMP/SideInstaller.ipa" "$stage"
+          app="$stage/Payload/SideInstaller.app"
+          test -d "$app"
+          test -x "$app/SideInstaller"
+
+          # Ad-hoc jailbreak signature, not an Apple Developer signature.
+          # Sign every Mach-O image, including the app extension and frameworks.
+          signed=0
+          while IFS= read -r -d '' item; do
+            if file -b "$item" | grep -q "Mach-O"; then
+              ldid -S "$item"
+              signed=$((signed + 1))
+              archs="$(lipo -archs "$item" 2>/dev/null || true)"
+              if [[ -n "$archs" && " $archs " != *" arm64 "* ]]; then
+                echo "::error::Unexpected architecture in $item: $archs"
+                exit 1
+              fi
+            fi
+          done < <(find "$app" -type f -print0)
+          test "$signed" -gt 0
+          echo "Signed $signed Mach-O binaries"
+          cp LICENSE.md "$app/LICENSE.md"
+          echo "APP_PATH=$app" >> "$GITHUB_ENV"
+
+      - name: Assemble Rootless deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg="$RUNNER_TEMP/deb-root"
+          out="$RUNNER_TEMP/SideInstaller-Relaxin-Rootless.deb"
+          mkdir -p "$pkg/DEBIAN" "$pkg/var/jb/Applications"
+          ditto "$APP_PATH" "$pkg/var/jb/Applications/SideInstaller.app"
+
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")"
+          build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")"
+          package_version="${app_version}-${GITHUB_RUN_NUMBER}"
+          cat > "$pkg/DEBIAN/control" <<CONTROL
+          Package: com.frizzle.sideinstaller-rootless
+          Name: SideInstaller (Relaxin Rootless)
+          Version: $package_version
+          Architecture: iphoneos-arm64
+          Description: SideInstaller standalone IPA signing app for rootless jailbreaks.
+          Maintainer: xiaofeifei996
+          Section: Applications
+          Depends: firmware (>= 17.4)
+          CONTROL
+
+          dpkg-deb --build --root-owner-group "$pkg" "$out"
+          dpkg-deb --info "$out"
+          dpkg-deb --contents "$out" | grep -E 'var/jb/Applications/SideInstaller.app/(Info.plist|SideInstaller)$'
+          test -s "$out"
+          shasum -a 256 "$out" | tee "$RUNNER_TEMP/deb-sha256.txt"
+          {
+            echo "## Rootless package"
+            echo
+            echo "- App version: $app_version"
+            echo "- App build: $build_number"
+            echo "- Debian version: $package_version"
+            echo "- Architecture: iphoneos-arm64 (runs on arm64e devices)"
+            echo "- Install path: /var/jb/Applications/SideInstaller.app"
+            echo "- Signature: ldid ad-hoc"
+            echo
+            cat "$RUNNER_TEMP/deb-sha256.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload installable deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideInstaller-Relaxin-Rootless-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/SideInstaller-Relaxin-Rootless.deb
+            ${{ runner.temp }}/deb-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
