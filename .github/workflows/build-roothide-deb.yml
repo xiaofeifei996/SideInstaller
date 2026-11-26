@@ -1,0 +1,208 @@
+name: build-roothide-deb
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - relaxin-rootless-ios26
+    paths:
+      - "ios-app/**"
+      - "ios-live-activity/**"
+      - "rust-core/**"
+      - "project.yml"
+      - "build-rust.sh"
+      - "scripts/build-ipa.sh"
+      - ".github/workflows/build-roothide-deb.yml"
+      - "LICENSE.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roothide-deb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODE_VERSION: "27.1"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build SideInstaller for RootHide
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=""
+          for candidate in "/Applications/Xcode_${XCODE_VERSION}.app" /Applications/Xcode_"${XCODE_VERSION}"_*.app; do
+            if [[ -d "$candidate" ]]; then app="$candidate"; break; fi
+          done
+          if [[ -z "$app" ]]; then
+            app="$(xcode-select -p)"
+            app="${app%/Contents/Developer}"
+            echo "::warning::Xcode ${XCODE_VERSION} not found by name; using $app"
+          fi
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$app/Contents/Developer" xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install xcodegen ldid dpkg
+          rustup target add aarch64-apple-ios
+          xcodegen --version
+          ldid -h >/dev/null 2>&1 || true
+          dpkg-deb --version
+          rustc --version
+          cargo --version
+
+      - name: Restore Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust-core/target
+          key: roothide-cargo-${{ runner.os }}-${{ hashFiles('rust-core/Cargo.lock') }}
+          restore-keys: roothide-cargo-${{ runner.os }}-
+
+      - name: Build iOS app
+        shell: bash
+        env:
+          OUTPUT: ${{ runner.temp }}/SideInstaller.ipa
+          DERIVED_DATA: ${{ runner.temp }}/DerivedData
+          MIN_IOS_SDK: "27.1"
+          REBUILD_RUST: "1"
+        run: bash scripts/build-ipa.sh
+
+      - name: Apply RootHide entitlements and ad-hoc signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/roothide-stage"
+          mkdir -p "$stage"
+          ditto -x -k "$RUNNER_TEMP/SideInstaller.ipa" "$stage"
+          app="$stage/Payload/SideInstaller.app"
+          test -d "$app"
+          test -x "$app/SideInstaller"
+
+          cat > "$RUNNER_TEMP/roothide-entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>platform-application</key>
+            <true/>
+            <key>com.apple.private.security.no-sandbox</key>
+            <true/>
+            <key>com.apple.private.security.storage.AppBundles</key>
+            <true/>
+            <key>com.apple.private.security.storage.AppDataContainers</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$RUNNER_TEMP/roothide-entitlements.plist"
+
+          # RootHide requires its app entitlements on the main executable.
+          ldid -S"$RUNNER_TEMP/roothide-entitlements.plist" "$app/SideInstaller"
+
+          # Sign remaining Mach-O payloads ad-hoc. Do not grant the app's
+          # elevated entitlements to embedded libraries or unrelated helpers.
+          signed=0
+          while IFS= read -r -d '' item; do
+            [[ "$item" == "$app/SideInstaller" ]] && continue
+            if file -b "$item" | grep -q "Mach-O"; then
+              ldid -S "$item"
+              signed=$((signed + 1))
+              archs="$(lipo -archs "$item" 2>/dev/null || true)"
+              if [[ -n "$archs" && " $archs " != *" arm64 "* ]]; then
+                echo "::error::Unexpected architecture in $item: $archs"
+                exit 1
+              fi
+            fi
+          done < <(find "$app" -type f -print0)
+
+          # Verify that the main executable retained the RootHide entitlements.
+          ldid -e "$app/SideInstaller" > "$RUNNER_TEMP/applied-entitlements.plist"
+          plutil -lint "$RUNNER_TEMP/applied-entitlements.plist"
+          grep -q 'platform-application' "$RUNNER_TEMP/applied-entitlements.plist"
+          grep -q 'com.apple.private.security.no-sandbox' "$RUNNER_TEMP/applied-entitlements.plist"
+          cp LICENSE.md "$app/LICENSE.md"
+          echo "APP_PATH=$app" >> "$GITHUB_ENV"
+          echo "Signed $((signed + 1)) Mach-O files"
+
+      - name: Package RootHide Debian
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg="$RUNNER_TEMP/roothide-deb-root"
+          out="$RUNNER_TEMP/SideInstaller-RootHide.deb"
+          mkdir -p "$pkg/DEBIAN" "$pkg/Applications"
+          ditto "$APP_PATH" "$pkg/Applications/SideInstaller.app"
+
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")"
+          build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")"
+          package_version="${app_version}-${GITHUB_RUN_NUMBER}"
+
+          cat > "$pkg/DEBIAN/control" <<CONTROL
+          Package: com.frizzle.sideinstaller-roothide
+          Name: SideInstaller (RootHide)
+          Version: $package_version
+          Architecture: iphoneos-arm64e
+          Description: SideInstaller standalone IPA signing app for RootHide jailbreak.
+          Maintainer: xiaofeifei996
+          Section: Applications
+          Depends: firmware (>= 17.4)
+          CONTROL
+
+          cat > "$pkg/DEBIAN/postinst" <<'POSTINST'
+          #!/bin/sh
+          set -e
+          if command -v uicache >/dev/null 2>&1; then
+            uicache -p /Applications/SideInstaller.app || true
+          fi
+          exit 0
+          POSTINST
+          chmod 755 "$pkg/DEBIAN/postinst"
+
+          dpkg-deb --build --root-owner-group "$pkg" "$out"
+          dpkg-deb --info "$out"
+          dpkg-deb --contents "$out" > "$RUNNER_TEMP/roothide-package-files.txt"
+          grep -q './Applications/SideInstaller.app/Info.plist' "$RUNNER_TEMP/roothide-package-files.txt"
+          grep -q './Applications/SideInstaller.app/SideInstaller' "$RUNNER_TEMP/roothide-package-files.txt"
+          test -s "$out"
+          shasum -a 256 "$out" | tee "$RUNNER_TEMP/roothide-sha256.txt"
+
+          {
+            echo "## RootHide package"
+            echo
+            echo "- App version: $app_version"
+            echo "- App build: $build_number"
+            echo "- Debian architecture: iphoneos-arm64e (RootHide package architecture)"
+            echo "- Package path: /Applications/SideInstaller.app inside the randomized jbroot"
+            echo "- Main executable: RootHide entitlements + ldid ad-hoc signature"
+            echo
+            cat "$RUNNER_TEMP/roothide-sha256.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload RootHide deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideInstaller-RootHide-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/SideInstaller-RootHide.deb
+            ${{ runner.temp }}/roothide-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
