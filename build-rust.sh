@@ -12,7 +12,7 @@ SIMULATOR="${SIMULATOR:-1}"
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Developer}"
 # Match the app's deployment floor, or cc-rs objects trip linker warnings.
-export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.4}"
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-16.0}"
 # Make ~/.cargo visible to non-login shells such as Xcode's.
 # shellcheck disable=SC1090
 # Only when cargo isn't on PATH already: GitHub's macOS runner has it there,
