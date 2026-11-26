@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - relaxin-rootless-ios26
+      - ios-auto-sign-roothide
     paths:
       - "ios-app/**"
       - "ios-live-activity/**"
