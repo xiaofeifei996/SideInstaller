@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 /// The activity log: every line Swift and the Rust core log, redacted, for the
 /// console in Settings, Copy logs and problem reports.
@@ -9,8 +9,7 @@ import Observation
 /// main thread nor the Rust thread that logged it waits on `LogRedactor`. The
 /// lines then reach `lines` on the main thread in the order they were logged,
 /// several at a time when they come quickly.
-@Observable
-final class LogStore {
+final class LogStore: ObservableObject {
 
     static let shared = LogStore()
 
@@ -21,7 +20,7 @@ final class LogStore {
     }
 
     /// The lines kept, oldest first. Changes on the main thread only.
-    private(set) var lines: [Entry] = []
+    @Published private(set) var lines: [Entry] = []
 
     /// How many lines to keep; the oldest are dropped first.
     private static let maxLines = 2000
@@ -41,10 +40,10 @@ final class LogStore {
     /// Redacts, stamps and mirrors lines, one at a time in the order logged.
     /// `.utility` fell seconds behind a burst of 2000 lines in the simulator;
     /// this keeps up in a fifth of a second.
-    @ObservationIgnored private let queue = DispatchQueue(label: "sideinstaller.log", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "sideinstaller.log", qos: .userInitiated)
     /// Lines ready for `lines`, waiting for the main thread. Guarded by `lock`.
-    @ObservationIgnored private var pending: [Entry] = []
-    @ObservationIgnored private let lock = NSLock()
+    private var pending: [Entry] = []
+    private let lock = NSLock()
 
     private init() {}
 
