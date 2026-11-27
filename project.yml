@@ -70,6 +70,9 @@ targets:
   SideInstallerLiveActivity:
     type: app-extension
     platform: iOS
+    # Live Activities and Dynamic Island APIs start at iOS 16.1.
+    # Keep the standalone app itself installable from iOS 16.0.
+    deploymentTarget: "16.1"
     sources:
       - path: ios-live-activity
       # What the activities show, shared with the app.
